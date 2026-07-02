@@ -280,7 +280,7 @@ function note(id,msg,cls){const n=$(id);n.className="note "+(cls||"info");n.inne
 function busy(id,msg){note(id,'<span class="spin"></span>'+msg,"info");}
 function txLink(hash){return `<a href="${EXPLORER}/tx/${hash}" target="_blank" rel="noopener">tx ↗</a>`;}
 function errMsg(e){
-  const m = e?.info?.error?.message || e?.shortMessage || e?.reason || e?.message || String(e);
+  const m = e?.reason || e?.revert?.args?.[0] || e?.info?.error?.data?.message || e?.info?.error?.message || e?.shortMessage || e?.message || String(e);
   return m.length>220 ? m.slice(0,220)+"…" : m;
 }
 
@@ -455,7 +455,14 @@ async function createBounty(){
     if(!sub||!rev){ note("nNote","Pick both deadlines.","err"); return; }
     const reward = ethers.parseEther(($("nReward").value||"0").trim());
     busy("nNote","Creating bounty… confirm in MetaMask.");
-    const tx = await judge.createBounty($("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev), {value:reward});
+    // Preflight: ask the contract directly so real revert reasons surface
+    // instead of MetaMask's generic "Internal JSON-RPC error".
+    try{
+      await judge.createBounty.staticCall($("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev), {value:reward});
+    }catch(pe){
+      note("nNote","Contract rejected it: "+errMsg(pe),"err"); return;
+    }
+    const tx = await judge.createBounty($("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev), {value:reward, gasLimit: 900000n});
     const rc = await tx.wait();
     let newId="?";
     for(const lg of rc.logs){ try{ const p=judge.interface.parseLog(lg); if(p?.name==="BountyCreated"){ newId=p.args.bountyId.toString(); } }catch(e){} }
@@ -479,7 +486,7 @@ async function commit(){
     const commitment = ethers.solidityPackedKeccak256(
       ["string","bytes32","address","uint256"], [answer, salt, account, id]);
     busy("aNote","Sealing… confirm in MetaMask.");
-    const tx = await judge.submitCommitment(id, commitment);
+    const tx = await judge.submitCommitment(id, commitment, {gasLimit: 400000n});
     const rc = await tx.wait();
     localStorage.setItem(sealKey(id), JSON.stringify({answer, salt}));
     $("saltVal").textContent = salt;
@@ -495,7 +502,7 @@ async function reveal(){
   if(id<=0n){ note("rNote","Load a bounty first.","err"); return; }
   try{
     busy("rNote","Revealing… confirm in MetaMask.");
-    const tx = await judge.revealAnswer(id, $("rAnswer").value, $("rSalt").value.trim());
+    const tx = await judge.revealAnswer(id, $("rAnswer").value, $("rSalt").value.trim(), {gasLimit: 500000n});
     const rc = await tx.wait();
     note("rNote", `Revealed ✓ ${txLink(rc.hash)} — your answer is now eligible for judging.`, "ok");
     loadBounty();
@@ -575,7 +582,7 @@ async function finalize(){
   try{
     const idx = BigInt($("wIdx").value||"0");
     busy("jNote","Finalizing and paying the winner… confirm in MetaMask.");
-    const tx = await judge.finalizeWinner(cur.id, idx);
+    const tx = await judge.finalizeWinner(cur.id, idx, {gasLimit: 400000n});
     const rc = await tx.wait();
     note("jNote", `Winner #${idx} paid ✓ ${txLink(rc.hash)}`, "ok");
     loadBounty();
@@ -586,7 +593,7 @@ async function cancel(){
   if(!signer||!judge||!cur){ note("jNote","Load the bounty first.","err"); return; }
   try{
     busy("jNote","Cancelling and reclaiming the reward… confirm in MetaMask.");
-    const tx = await judge.cancelBounty(cur.id);
+    const tx = await judge.cancelBounty(cur.id, {gasLimit: 300000n});
     const rc = await tx.wait();
     note("jNote", `Bounty cancelled, reward refunded ✓ ${txLink(rc.hash)}`, "ok");
     loadBounty();
