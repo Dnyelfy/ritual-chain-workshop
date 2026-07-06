@@ -285,12 +285,15 @@ function errMsg(e){
 }
 
 /* ============================ network ============================ */
+/* Ritual's block.timestamp is in MILLISECONDS (sub-second blocks).
+   Detect the unit so the same file works on any EVM chain. */
+function tsToSec(t){ t = Number(t); return t > 1e11 ? Math.floor(t/1000) : t; }
 let chainOffset = 0; // chain time - local time, seconds
 async function pollBlock(){
   try{
     const blk = await (provider ?? readProvider).getBlock("latest");
     $("sBlock").textContent = Number(blk.number).toLocaleString("en-US");
-    chainOffset = Number(blk.timestamp) - Math.floor(Date.now()/1000);
+    chainOffset = tsToSec(blk.timestamp) - Math.floor(Date.now()/1000);
   }catch(e){}
 }
 pollBlock(); setInterval(pollBlock, 6000);
@@ -364,8 +367,8 @@ function fmtLeft(s){
 function phaseOf(b, now){ /* now is chain-anchored */
   if(b.finalized) return 3;
   if(b.judged) return 3;                 // judged, waiting finalize → Final column active
-  if(now >= Number(b.revealDeadline)) return 2;
-  if(now >= Number(b.submissionDeadline)) return 1;
+  if(now >= tsToSec(b.revealDeadline)) return 2;
+  if(now >= tsToSec(b.submissionDeadline)) return 1;
   return 0;
 }
 
@@ -377,10 +380,10 @@ function renderRail(){
     const el=$("ph"+i);
     el.className = "phase" + (i===p ? " on" : (i<p ? " done" : ""));
   }
-  $("pv0").textContent = now < Number(cur.submissionDeadline) ? fmtLeft(Number(cur.submissionDeadline)-now) : "closed";
-  $("pv1").textContent = now < Number(cur.submissionDeadline) ? "waiting"
-                        : now < Number(cur.revealDeadline) ? fmtLeft(Number(cur.revealDeadline)-now) : "closed";
-  $("pv2").textContent = cur.judged ? "verdict in" : (now >= Number(cur.revealDeadline) ? "ready" : "waiting");
+  $("pv0").textContent = now < tsToSec(cur.submissionDeadline) ? fmtLeft(tsToSec(cur.submissionDeadline)-now) : "closed";
+  $("pv1").textContent = now < tsToSec(cur.submissionDeadline) ? "waiting"
+                        : now < tsToSec(cur.revealDeadline) ? fmtLeft(tsToSec(cur.revealDeadline)-now) : "closed";
+  $("pv2").textContent = cur.judged ? "verdict in" : (now >= tsToSec(cur.revealDeadline) ? "ready" : "waiting");
   $("pv3").textContent = cur.finalized ? "paid" : (cur.judged ? "awaiting owner" : "waiting");
 }
 
@@ -477,8 +480,9 @@ async function createBounty(){
     busy("nNote","Reading chain time…");
     const blk = await provider.getBlock("latest"); // wallet's view of the chain
     const chainNow = Number(blk.timestamp);
-    const sub = chainNow + 120 + mSub*60; // +2 min safety buffer
-    const rev = sub + mRev*60;
+    const unit = chainNow > 1e11 ? 1000 : 1; // ms-based chain (Ritual) vs seconds
+    const sub = chainNow + (120 + mSub*60)*unit; // +2 min safety buffer
+    const rev = sub + mRev*60*unit;
     const reward = ethers.parseEther(($("nReward").value||"0").trim());
     busy("nNote","Creating bounty… confirm in MetaMask.");
     // Preflight: ask the contract directly so real revert reasons surface
