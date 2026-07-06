@@ -200,8 +200,8 @@
     <label for="nRubric">Rubric — how the AI should judge</label>
     <textarea id="nRubric" placeholder="Judge by clarity, originality and how well it fits Ritual's positioning."></textarea>
     <div class="row">
-      <div><label for="nSub">Submissions close</label><input id="nSub" type="datetime-local" /></div>
-      <div><label for="nRev">Reveals close</label><input id="nRev" type="datetime-local" /></div>
+      <div><label for="nSub">Submission window (minutes)</label><input id="nSub" value="15" inputmode="numeric" /></div>
+      <div><label for="nRev">Reveal window (minutes)</label><input id="nRev" value="15" inputmode="numeric" /></div>
       <div><label for="nReward">Reward (RITUAL)</label><input id="nReward" placeholder="0.1" inputmode="decimal" /></div>
     </div>
     <div class="row" style="margin-top:14px"><button id="createBtn" class="btn slim">Create bounty</button></div>
@@ -285,8 +285,13 @@ function errMsg(e){
 }
 
 /* ============================ network ============================ */
+let chainOffset = 0; // chain time - local time, seconds
 async function pollBlock(){
-  try{ $("sBlock").textContent = (await readProvider.getBlockNumber()).toLocaleString("en-US"); }catch(e){}
+  try{
+    const blk = await readProvider.getBlock("latest");
+    $("sBlock").textContent = Number(blk.number).toLocaleString("en-US");
+    chainOffset = Number(blk.timestamp) - Math.floor(Date.now()/1000);
+  }catch(e){}
 }
 pollBlock(); setInterval(pollBlock, 6000);
 
@@ -356,7 +361,7 @@ function fmtLeft(s){
   return `${m}m ${Math.floor(s%60)}s left`;
 }
 
-function phaseOf(b, now){
+function phaseOf(b, now){ /* now is chain-anchored */
   if(b.finalized) return 3;
   if(b.judged) return 3;                 // judged, waiting finalize → Final column active
   if(now >= Number(b.revealDeadline)) return 2;
@@ -366,7 +371,7 @@ function phaseOf(b, now){
 
 function renderRail(){
   if(!cur) return;
-  const now = Math.floor(Date.now()/1000);
+  const now = Math.floor(Date.now()/1000) + chainOffset;
   const p = phaseOf(cur, now);
   for(let i=0;i<4;i++){
     const el=$("ph"+i);
@@ -450,9 +455,13 @@ function renderVerdict(){
 async function createBounty(){
   if(!signer||!judge){ note("nNote","Connect wallet and set the contract first.","err"); return; }
   try{
-    const sub = Math.floor(new Date($("nSub").value).getTime()/1000);
-    const rev = Math.floor(new Date($("nRev").value).getTime()/1000);
-    if(!sub||!rev){ note("nNote","Pick both deadlines.","err"); return; }
+    const mSub = parseInt($("nSub").value||"0"), mRev = parseInt($("nRev").value||"0");
+    if(!mSub||!mRev||mSub<1||mRev<1){ note("nNote","Enter both windows in minutes (e.g. 15).","err"); return; }
+    busy("nNote","Reading chain time…");
+    const blk = await readProvider.getBlock("latest");
+    const chainNow = Number(blk.timestamp);
+    const sub = chainNow + mSub*60;
+    const rev = sub + mRev*60;
     const reward = ethers.parseEther(($("nReward").value||"0").trim());
     busy("nNote","Creating bounty… confirm in MetaMask.");
     // Preflight: ask the contract directly so real revert reasons surface
