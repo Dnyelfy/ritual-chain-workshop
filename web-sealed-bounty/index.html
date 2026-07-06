@@ -451,6 +451,23 @@ function renderVerdict(){
   el.className = "verdict show";
 }
 
+
+/* Post-mortem for a mined-but-reverted tx: figure out WHY and show it. */
+async function explainRevert(e, replay){
+  let out = [];
+  const rcp = e?.receipt;
+  if(rcp){
+    out.push(`status ${rcp.status} · gasUsed ${rcp.gasUsed}`);
+    if(e?.transaction?.gasLimit && rcp.gasUsed === e.transaction.gasLimit) out.push("looks like OUT OF GAS");
+    out.push(`<a href="${EXPLORER}/tx/${rcp.hash}" target="_blank" rel="noopener">tx ↗</a>`);
+  }
+  if(replay){
+    try{ await replay(); out.push("replay now succeeds — likely a timing/state race, just try again"); }
+    catch(pe){ out.push("revert reason: "+errMsg(pe)); }
+  }
+  return out.join(" · ");
+}
+
 /* ============================ create ============================ */
 async function createBounty(){
   if(!signer||!judge){ note("nNote","Connect wallet and set the contract first.","err"); return; }
@@ -471,8 +488,14 @@ async function createBounty(){
     }catch(pe){
       note("nNote","Contract rejected it: "+errMsg(pe),"err"); return;
     }
-    const tx = await judge.createBounty($("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev), {value:reward, gasLimit: 900000n});
-    const rc = await tx.wait();
+    const cbArgs = [$("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev)];
+    const tx = await judge.createBounty(...cbArgs, {value:reward, gasLimit: 2000000n});
+    let rc;
+    try{ rc = await tx.wait(); }
+    catch(we){
+      const why = await explainRevert(we, ()=>judge.createBounty.staticCall(...cbArgs, {value:reward}));
+      note("nNote","Reverted on-chain — "+why,"err"); return;
+    }
     let newId="?";
     for(const lg of rc.logs){ try{ const p=judge.interface.parseLog(lg); if(p?.name==="BountyCreated"){ newId=p.args.bountyId.toString(); } }catch(e){} }
     note("nNote", `Bounty <b>#${newId}</b> created ${txLink(rc.hash)}. Share the id with participants.`, "ok");
