@@ -281,6 +281,7 @@ function busy(id,msg){note(id,'<span class="spin"></span>'+msg,"info");}
 function txLink(hash){return `<a href="${EXPLORER}/tx/${hash}" target="_blank" rel="noopener">tx ↗</a>`;}
 function errMsg(e){
   const m = e?.reason || e?.revert?.args?.[0] || e?.info?.error?.data?.message || e?.info?.error?.message || e?.shortMessage || e?.message || String(e);
+  if(/coalesce|circuit break/i.test(m)) return "MetaMask'in RPC baglantisi gecici olarak tikandi. 30 saniye bekle, sayfayi yenile ve tekrar dene. Gecmezse MetaMask'i kilitleyip ac.";
   return m.length>220 ? m.slice(0,220)+"…" : m;
 }
 
@@ -488,7 +489,7 @@ async function createBounty(){
     // Preflight: ask the contract directly so real revert reasons surface
     // instead of MetaMask's generic "Internal JSON-RPC error".
     try{
-      await judge.createBounty.staticCall($("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev), {value:reward});
+      await judge.connect(readProvider).createBounty.staticCall($("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev), {value:reward, from: account});
     }catch(pe){
       note("nNote","Contract rejected it: "+errMsg(pe),"err"); return;
     }
@@ -497,7 +498,7 @@ async function createBounty(){
     let rc;
     try{ rc = await tx.wait(); }
     catch(we){
-      const why = await explainRevert(we, ()=>judge.createBounty.staticCall(...cbArgs, {value:reward}));
+      const why = await explainRevert(we, ()=>judge.connect(readProvider).createBounty.staticCall(...cbArgs, {value:reward, from: account}));
       note("nNote","Reverted on-chain — "+why,"err"); return;
     }
     let newId="?";
@@ -587,12 +588,13 @@ async function fundFees(){
   try{
     busy("jNote","Depositing 0.5 RITUAL to your RitualWallet fee balance… confirm in MetaMask.");
     const rw = new ethers.Contract(RITUAL_WALLET, WALLET_ABI, signer);
-    try{ await rw.deposit.staticCall(50000n, {value: ethers.parseEther("0.5")}); }
+    const rwRead = new ethers.Contract(RITUAL_WALLET, WALLET_ABI, readProvider);
+    try{ await rwRead.deposit.staticCall(50000n, {value: ethers.parseEther("0.5"), from: account}); }
     catch(pe){ note("jNote","Deposit rejected: "+errMsg(pe),"err"); return; }
     const tx = await rw.deposit(50000n, {value: ethers.parseEther("0.5"), gasLimit: 300000n});
     try{ await tx.wait(); }
     catch(we){
-      const why = await explainRevert(we, ()=>rw.deposit.staticCall(50000n, {value: ethers.parseEther("0.5")}));
+      const why = await explainRevert(we, ()=>rwRead.deposit.staticCall(50000n, {value: ethers.parseEther("0.5"), from: account}));
       note("jNote","Deposit reverted — "+why,"err"); return;
     }
     note("jNote","Fee balance funded ✓ — one inference escrows ~0.31 RITUAL.","ok");
@@ -616,7 +618,7 @@ async function judgeAll(){
     let rc;
     try{ rc = await tx.wait(); }
     catch(we){
-      const why = await explainRevert(we, ()=>judge.judgeAll.staticCall(id, llmInput));
+      const why = await explainRevert(we, ()=>judge.connect(readProvider).judgeAll.staticCall(id, llmInput, {from: account}));
       note("jNote","Judge reverted — "+why,"err"); return;
     }
     note("jNote", `Verdict is on-chain ✓ ${txLink(rc.hash)}`, "ok");
