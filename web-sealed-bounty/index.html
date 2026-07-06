@@ -292,7 +292,7 @@ function tsToSec(t){ t = Number(t); return t > 1e11 ? Math.floor(t/1000) : t; }
 let chainOffset = 0; // chain time - local time, seconds
 async function pollBlock(){
   try{
-    const blk = await (provider ?? readProvider).getBlock("latest");
+    const blk = await readProvider.getBlock("latest");
     $("sBlock").textContent = Number(blk.number).toLocaleString("en-US");
     chainOffset = tsToSec(blk.timestamp) - Math.floor(Date.now()/1000);
   }catch(e){}
@@ -302,8 +302,9 @@ pollBlock(); setInterval(pollBlock, 6000);
 async function refreshNet(){
   const pill=$("netPill");
   if(!account){ pill.className="pill"; $("netText").textContent="offline"; return; }
-  const net = await provider.getNetwork().catch(()=>null);
-  if(net && Number(net.chainId)===CHAIN_ID){ pill.className="pill live"; $("netText").textContent="Ritual testnet"; }
+  let cid = "0x0";
+  try{ cid = await window.ethereum.request({method:"eth_chainId"}); }catch(e){}
+  if(parseInt(cid,16)===CHAIN_ID){ pill.className="pill live"; $("netText").textContent="Ritual testnet"; }
   else{ pill.className="pill wrong"; $("netText").textContent="wrong network"; }
 }
 
@@ -323,35 +324,28 @@ async function ensureChain(){
 async function connect(){
   if(typeof window.ethereum==="undefined"){ note("cNote","No browser wallet found. Install MetaMask, then reload.","err"); return; }
   try{
-    provider = new ethers.BrowserProvider(window.ethereum);
-    await window.ethereum.request({method:"eth_requestAccounts"});
+    const accts = await window.ethereum.request({method:"eth_requestAccounts"});
+    account = ethers.getAddress(accts[0]);
     await ensureChain();
-    provider = new ethers.BrowserProvider(window.ethereum);
-    signer = await provider.getSigner();
-    account = await signer.getAddress();
     $("connectBtn").textContent = short(account);
     await refreshNet();
-    if(judge) judge = judge.connect(signer);
   }catch(e){ note("cNote", errMsg(e), "err"); }
 }
 
 /* ============================ contract ============================ */
 function setContract(addr){
-  judge = new ethers.Contract(addr, ABI, signer || readProvider);
+  judge = new ethers.Contract(addr, ABI, readProvider);
   localStorage.setItem("sealed:contract", addr);
   $("cAddr").value = addr;
   note("cNote", `Using <a href="${EXPLORER}/address/${addr}" target="_blank" rel="noopener">${short(addr)} ↗</a>`, "ok");
 }
 
 async function deployContract(){
-  if(!signer){ note("cNote","Connect your wallet first.","err"); return; }
+  if(!account){ note("cNote","Connect your wallet first.","err"); return; }
   try{
     busy("cNote","Deploying AIJudgeCommitReveal… confirm in MetaMask.");
-    const f = new ethers.ContractFactory(ABI, BYTECODE, signer);
-    const c = await f.deploy();
-    busy("cNote","Waiting for confirmation…");
-    await c.waitForDeployment();
-    setContract(await c.getAddress());
+    const rc = await sendRaw({ data: BYTECODE, gas: hexVal(6_000_000n) });
+    setContract(rc.contractAddress);
   }catch(e){ note("cNote", errMsg(e), "err"); }
 }
 
@@ -456,6 +450,19 @@ function renderVerdict(){
 }
 
 
+/* Send via raw eth_sendTransaction (MetaMask fills nonce/fees itself),
+   then wait for the receipt on the DIRECT RPC — MetaMask's flaky internal
+   connection is never used for polling or reads. */
+function hexVal(v){ return "0x" + BigInt(v).toString(16); }
+async function sendRaw(params){
+  const tx = Object.assign({ from: account }, params);
+  const hash = await window.ethereum.request({ method: "eth_sendTransaction", params: [tx] });
+  const rc = await readProvider.waitForTransaction(hash, 1, 240000);
+  if(!rc){ const e = new Error("timed out waiting for receipt"); e.hash = hash; throw e; }
+  if(rc.status !== 1){ const e = new Error("transaction reverted"); e.receipt = rc; throw e; }
+  return rc;
+}
+
 /* Post-mortem for a mined-but-reverted tx: figure out WHY and show it. */
 async function explainRevert(e, replay){
   let out = [];
@@ -474,12 +481,12 @@ async function explainRevert(e, replay){
 
 /* ============================ create ============================ */
 async function createBounty(){
-  if(!signer||!judge){ note("nNote","Connect wallet and set the contract first.","err"); return; }
+  if(!account||!judge){ note("nNote","Connect wallet and set the contract first.","err"); return; }
   try{
     const mSub = parseInt($("nSub").value||"0"), mRev = parseInt($("nRev").value||"0");
     if(!mSub||!mRev||mSub<1||mRev<1){ note("nNote","Enter both windows in minutes (e.g. 15).","err"); return; }
     busy("nNote","Reading chain time…");
-    const blk = await provider.getBlock("latest"); // wallet's view of the chain
+    const blk = await readProvider.getBlock("latest");
     const chainNow = Number(blk.timestamp);
     const unit = chainNow > 1e11 ? 1000 : 1; // ms-based chain (Ritual) vs seconds
     const sub = chainNow + (120 + mSub*60)*unit; // +2 min safety buffer
@@ -489,16 +496,18 @@ async function createBounty(){
     // Preflight: ask the contract directly so real revert reasons surface
     // instead of MetaMask's generic "Internal JSON-RPC error".
     try{
-      await judge.connect(readProvider).createBounty.staticCall($("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev), {value:reward, from: account});
+      await judge.createBounty.staticCall($("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev), {value:reward, from: account});
     }catch(pe){
       note("nNote","Contract rejected it: "+errMsg(pe),"err"); return;
     }
     const cbArgs = [$("nTitle").value, $("nRubric").value, BigInt(sub), BigInt(rev)];
-    const tx = await judge.createBounty(...cbArgs, {value:reward, gasLimit: 2000000n});
     let rc;
-    try{ rc = await tx.wait(); }
-    catch(we){
-      const why = await explainRevert(we, ()=>judge.connect(readProvider).createBounty.staticCall(...cbArgs, {value:reward, from: account}));
+    try{
+      rc = await sendRaw({ to: await judge.getAddress(),
+        data: judge.interface.encodeFunctionData("createBounty", cbArgs),
+        value: hexVal(reward), gas: hexVal(2_000_000n) });
+    }catch(we){
+      const why = await explainRevert(we, ()=>judge.createBounty.staticCall(...cbArgs, {value:reward, from: account}));
       note("nNote","Reverted on-chain — "+why,"err"); return;
     }
     let newId="?";
@@ -513,7 +522,7 @@ function sealKey(id){ return `sealed:salt:${$("cAddr").value.toLowerCase()}:${id
 function getSeal(id){ try{ return JSON.parse(localStorage.getItem(sealKey(id))||"null"); }catch(e){ return null; } }
 
 async function commit(){
-  if(!signer||!judge){ note("aNote","Connect wallet and set the contract first.","err"); return; }
+  if(!account||!judge){ note("aNote","Connect wallet and set the contract first.","err"); return; }
   const id = BigInt($("bId").value||"0");
   if(id<=0n){ note("aNote","Load a bounty first (enter its id above).","err"); return; }
   const answer = $("aAnswer").value;
@@ -523,8 +532,9 @@ async function commit(){
     const commitment = ethers.solidityPackedKeccak256(
       ["string","bytes32","address","uint256"], [answer, salt, account, id]);
     busy("aNote","Sealing… confirm in MetaMask.");
-    const tx = await judge.submitCommitment(id, commitment, {gasLimit: 400000n});
-    const rc = await tx.wait();
+    const rc = await sendRaw({ to: await judge.getAddress(),
+      data: judge.interface.encodeFunctionData("submitCommitment", [id, commitment]),
+      gas: hexVal(400_000n) });
     localStorage.setItem(sealKey(id), JSON.stringify({answer, salt}));
     $("saltVal").textContent = salt;
     $("saltBox").className = "saltbox show";
@@ -534,13 +544,14 @@ async function commit(){
 
 /* ============================ reveal ============================ */
 async function reveal(){
-  if(!signer||!judge){ note("rNote","Connect wallet and set the contract first.","err"); return; }
+  if(!account||!judge){ note("rNote","Connect wallet and set the contract first.","err"); return; }
   const id = BigInt($("bId").value||"0");
   if(id<=0n){ note("rNote","Load a bounty first.","err"); return; }
   try{
     busy("rNote","Revealing… confirm in MetaMask.");
-    const tx = await judge.revealAnswer(id, $("rAnswer").value, $("rSalt").value.trim(), {gasLimit: 500000n});
-    const rc = await tx.wait();
+    const rc = await sendRaw({ to: await judge.getAddress(),
+      data: judge.interface.encodeFunctionData("revealAnswer", [id, $("rAnswer").value, $("rSalt").value.trim()]),
+      gas: hexVal(500_000n) });
     note("rNote", `Revealed ✓ ${txLink(rc.hash)} — your answer is now eligible for judging.`, "ok");
     loadBounty();
   }catch(e){ note("rNote", errMsg(e), "err"); }
@@ -584,16 +595,17 @@ function buildLlmInput(title, rubric, subs){
 }
 
 async function fundFees(){
-  if(!signer){ note("jNote","Connect your wallet first.","err"); return; }
+  if(!account){ note("jNote","Connect your wallet first.","err"); return; }
   try{
     busy("jNote","Depositing 0.5 RITUAL to your RitualWallet fee balance… confirm in MetaMask.");
-    const rw = new ethers.Contract(RITUAL_WALLET, WALLET_ABI, signer);
     const rwRead = new ethers.Contract(RITUAL_WALLET, WALLET_ABI, readProvider);
     try{ await rwRead.deposit.staticCall(50000n, {value: ethers.parseEther("0.5"), from: account}); }
     catch(pe){ note("jNote","Deposit rejected: "+errMsg(pe),"err"); return; }
-    const tx = await rw.deposit(50000n, {value: ethers.parseEther("0.5"), gasLimit: 300000n});
-    try{ await tx.wait(); }
-    catch(we){
+    try{
+      await sendRaw({ to: RITUAL_WALLET,
+        data: rwRead.interface.encodeFunctionData("deposit", [50000n]),
+        value: hexVal(ethers.parseEther("0.5")), gas: hexVal(300_000n) });
+    }catch(we){
       const why = await explainRevert(we, ()=>rwRead.deposit.staticCall(50000n, {value: ethers.parseEther("0.5"), from: account}));
       note("jNote","Deposit reverted — "+why,"err"); return;
     }
@@ -602,7 +614,7 @@ async function fundFees(){
 }
 
 async function judgeAll(){
-  if(!signer||!judge||!cur){ note("jNote","Connect, set the contract and load the bounty first.","err"); return; }
+  if(!account||!judge||!cur){ note("jNote","Connect, set the contract and load the bounty first.","err"); return; }
   try{
     busy("jNote","Collecting revealed answers…");
     const id = cur.id;
@@ -614,11 +626,13 @@ async function judgeAll(){
     }
     const llmInput = buildLlmInput(cur.title, cur.rubric, subs);
     busy("jNote",`Judging ${subs.length} revealed answers in one batch inference… confirm in MetaMask (this can take a while on-chain).`);
-    const tx = await judge.judgeAll(id, llmInput, {gasLimit: 12_000_000n});
     let rc;
-    try{ rc = await tx.wait(); }
-    catch(we){
-      const why = await explainRevert(we, ()=>judge.connect(readProvider).judgeAll.staticCall(id, llmInput, {from: account}));
+    try{
+      rc = await sendRaw({ to: await judge.getAddress(),
+        data: judge.interface.encodeFunctionData("judgeAll", [id, llmInput]),
+        gas: hexVal(12_000_000n) });
+    }catch(we){
+      const why = await explainRevert(we, ()=>judge.judgeAll.staticCall(id, llmInput, {from: account}));
       note("jNote","Judge reverted — "+why,"err"); return;
     }
     note("jNote", `Verdict is on-chain ✓ ${txLink(rc.hash)}`, "ok");
@@ -627,23 +641,25 @@ async function judgeAll(){
 }
 
 async function finalize(){
-  if(!signer||!judge||!cur){ note("jNote","Load the bounty first.","err"); return; }
+  if(!account||!judge||!cur){ note("jNote","Load the bounty first.","err"); return; }
   try{
     const idx = BigInt($("wIdx").value||"0");
     busy("jNote","Finalizing and paying the winner… confirm in MetaMask.");
-    const tx = await judge.finalizeWinner(cur.id, idx, {gasLimit: 400000n});
-    const rc = await tx.wait();
+    const rc = await sendRaw({ to: await judge.getAddress(),
+      data: judge.interface.encodeFunctionData("finalizeWinner", [cur.id, idx]),
+      gas: hexVal(400_000n) });
     note("jNote", `Winner #${idx} paid ✓ ${txLink(rc.hash)}`, "ok");
     loadBounty();
   }catch(e){ note("jNote", errMsg(e), "err"); }
 }
 
 async function cancel(){
-  if(!signer||!judge||!cur){ note("jNote","Load the bounty first.","err"); return; }
+  if(!account||!judge||!cur){ note("jNote","Load the bounty first.","err"); return; }
   try{
     busy("jNote","Cancelling and reclaiming the reward… confirm in MetaMask.");
-    const tx = await judge.cancelBounty(cur.id, {gasLimit: 300000n});
-    const rc = await tx.wait();
+    const rc = await sendRaw({ to: await judge.getAddress(),
+      data: judge.interface.encodeFunctionData("cancelBounty", [cur.id]),
+      gas: hexVal(300_000n) });
     note("jNote", `Bounty cancelled, reward refunded ✓ ${txLink(rc.hash)}`, "ok");
     loadBounty();
   }catch(e){ note("jNote", errMsg(e), "err"); }
