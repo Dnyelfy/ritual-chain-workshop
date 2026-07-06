@@ -288,7 +288,7 @@ function errMsg(e){
 let chainOffset = 0; // chain time - local time, seconds
 async function pollBlock(){
   try{
-    const blk = await readProvider.getBlock("latest");
+    const blk = await (provider ?? readProvider).getBlock("latest");
     $("sBlock").textContent = Number(blk.number).toLocaleString("en-US");
     chainOffset = Number(blk.timestamp) - Math.floor(Date.now()/1000);
   }catch(e){}
@@ -475,9 +475,9 @@ async function createBounty(){
     const mSub = parseInt($("nSub").value||"0"), mRev = parseInt($("nRev").value||"0");
     if(!mSub||!mRev||mSub<1||mRev<1){ note("nNote","Enter both windows in minutes (e.g. 15).","err"); return; }
     busy("nNote","Reading chain time…");
-    const blk = await readProvider.getBlock("latest");
+    const blk = await provider.getBlock("latest"); // wallet's view of the chain
     const chainNow = Number(blk.timestamp);
-    const sub = chainNow + mSub*60;
+    const sub = chainNow + 120 + mSub*60; // +2 min safety buffer
     const rev = sub + mRev*60;
     const reward = ethers.parseEther(($("nReward").value||"0").trim());
     busy("nNote","Creating bounty… confirm in MetaMask.");
