@@ -587,8 +587,14 @@ async function fundFees(){
   try{
     busy("jNote","Depositing 0.5 RITUAL to your RitualWallet fee balance… confirm in MetaMask.");
     const rw = new ethers.Contract(RITUAL_WALLET, WALLET_ABI, signer);
+    try{ await rw.deposit.staticCall(50000n, {value: ethers.parseEther("0.5")}); }
+    catch(pe){ note("jNote","Deposit rejected: "+errMsg(pe),"err"); return; }
     const tx = await rw.deposit(50000n, {value: ethers.parseEther("0.5"), gasLimit: 300000n});
-    await tx.wait();
+    try{ await tx.wait(); }
+    catch(we){
+      const why = await explainRevert(we, ()=>rw.deposit.staticCall(50000n, {value: ethers.parseEther("0.5")}));
+      note("jNote","Deposit reverted — "+why,"err"); return;
+    }
     note("jNote","Fee balance funded ✓ — one inference escrows ~0.31 RITUAL.","ok");
   }catch(e){ note("jNote", errMsg(e), "err"); }
 }
@@ -606,8 +612,13 @@ async function judgeAll(){
     }
     const llmInput = buildLlmInput(cur.title, cur.rubric, subs);
     busy("jNote",`Judging ${subs.length} revealed answers in one batch inference… confirm in MetaMask (this can take a while on-chain).`);
-    const tx = await judge.judgeAll(id, llmInput, {gasLimit: 5_000_000n});
-    const rc = await tx.wait();
+    const tx = await judge.judgeAll(id, llmInput, {gasLimit: 12_000_000n});
+    let rc;
+    try{ rc = await tx.wait(); }
+    catch(we){
+      const why = await explainRevert(we, ()=>judge.judgeAll.staticCall(id, llmInput));
+      note("jNote","Judge reverted — "+why,"err"); return;
+    }
     note("jNote", `Verdict is on-chain ✓ ${txLink(rc.hash)}`, "ok");
     loadBounty();
   }catch(e){ note("jNote", errMsg(e), "err"); }
